@@ -1,0 +1,19 @@
+PO Intelligence - Educational Use Notice
+
+Copyright (c) 2026 Sarat Sasikumar. All rights reserved.
+
+This repository is a personal learning project, published so that others can read
+the code and see how the system was designed and tested.
+
+You may view and study this code, and run it in your own environment for personal,
+non-commercial learning.
+
+You may not sell it, offer it or any part of it as a product or service, or use it
+for any commercial purpose.
+
+This project is not a product. It is not offered for sale or as a service, and it has
+no customers or users. All data in it (purchase orders, companies, parts, prices) is
+synthetic, and the ERP it connects to is a mock.
+
+THE CODE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. THE AUTHOR IS NOT LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM ITS USE.

@@ -1,0 +1,121 @@
+# Steps C1 + C2: every push and pull request runs all the checks in GitHub's cloud.
+# Only a push to main that passes every check is then deployed to AWS (C2), using a
+# short-lived OIDC login: no AWS keys are stored in GitHub.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:          # "Run workflow" button, e.g. to redeploy without a code change
+
+permissions:
+  contents: read              # least privilege: the check jobs can only read the code
+
+concurrency:                  # on pull requests a newer push cancels the older check;
+  group: ci-${{ github.ref }} # on main nothing is cancelled, so a deploy is never cut off halfway
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  backend:
+    name: Backend tests (pipeline, rules, API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"       # same as the Lambda runtime
+          cache: pip
+      - run: pip install -r requirements.txt pytest==8.4.2
+      - run: python -m pytest -q
+
+  infra:
+    name: Infra tests (security and cost guards)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  frontend:
+    name: Frontend type check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci                 # exact versions from package-lock.json
+      - run: npm run build          # TypeScript check + production build
+
+  deploy:
+    name: Deploy to AWS
+    needs: [backend, infra, frontend]                     # only if every check passed
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write                                     # lets GitHub sign the OIDC login token
+    concurrency:
+      group: deploy-production                            # one deploy at a time, never cancelled midway
+      cancel-in-progress: false
+    env:
+      VITE_API_URL: ${{ vars.VITE_API_URL }}              # repository variables (not secrets: both are public)
+      VITE_DEMO_TOKEN: ${{ vars.VITE_DEMO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Build the website
+        working-directory: frontend
+        run: |
+          test -n "$VITE_API_URL" || { echo "Set the VITE_API_URL repository variable"; exit 1; }
+          npm ci && npm run build
+      - name: Log in to AWS (OIDC, temporary 1-hour credentials)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+      - name: Deploy the app stacks (not the CI/CD role itself)
+        working-directory: infra
+        run: |
+          pip install -r requirements.txt
+          npx --yes aws-cdk@2 deploy PoIntelligenceCertStack PoIntelligenceStack \
+            --require-approval never --progress events
+      - name: Smoke test the live site (fails the run if visitors would see a broken demo)
+        env:
+          SITE_URL: ${{ vars.SITE_URL || 'https://po.saratsasikumar.com' }}
+        run: |
+          sleep 20                                                     # let CloudFront pick up the new files
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$SITE_URL/")" = 200
+          curl -sf -H "Authorization: Bearer $VITE_DEMO_TOKEN" "$VITE_API_URL/me"  | grep -q '"viewer"'
+          curl -sf -H "Authorization: Bearer $VITE_DEMO_TOKEN" "$VITE_API_URL/pos" | grep -q '"items"'
+          curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $VITE_DEMO_TOKEN" \
+            "$VITE_API_URL/uploads" | grep -q 403                       # the demo must stay read-only
+          echo "Live site OK: page loads, demo login works, demo cannot upload"
